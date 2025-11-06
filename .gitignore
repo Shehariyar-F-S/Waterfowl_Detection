@@ -1,0 +1,7 @@
+echo "runs/
+data/images/
+data/labels/
+__pycache__/
+*.zip
+*.pt
+.DS_Store" > .gitignore
