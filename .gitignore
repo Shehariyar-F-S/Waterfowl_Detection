@@ -1,7 +1,9 @@
-echo "runs/
+# Ignore datasets
 data/images/
 data/labels/
-__pycache__/
-*.zip
+raw_dataset/
+runs/
+*.jpg
+*.tif
 *.pt
-.DS_Store" > .gitignore
+*.zip

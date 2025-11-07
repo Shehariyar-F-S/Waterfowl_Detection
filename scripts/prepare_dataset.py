@@ -7,111 +7,142 @@ import shutil
 # ==== CONFIGURATION ====
 base_dir = "/Users/shehariyarfs/Desktop/MAI./CV/46k66mz9sz-2/00_UAV-derived Thermal Waterfowl Dataset/00_UAV-derived Waterfowl Thermal Imagery Dataset/01_Thermal Images and Ground Truth (used for detector training and testing)"
 
-pos_dir = os.path.join(base_dir, "01_Posistive Image")
-neg_dir = os.path.join(base_dir, "03_Negative Images")
+pos_img_dir = os.path.join(base_dir, "01_Posistive Image")
+neg_img_dir = os.path.join(base_dir, "03_Negative Images")
 csv_path = os.path.join(base_dir, "02_Groundtruth Label for Positive Images", "Bounding Box Label.csv")
 
 output_image_dir = "data/images/all"
 output_label_dir = "data/labels/all"
-
+split_root = "data/images"
 os.makedirs(output_image_dir, exist_ok=True)
 os.makedirs(output_label_dir, exist_ok=True)
 
-# ==== STEP 1: Convert positive .tif → .jpg ====
-print("🔄 Converting positive .tif images to .jpg ...")
-for file in os.listdir(pos_dir):
-    if file.endswith(".tif"):
-        jpg_path = os.path.join(output_image_dir, file.replace(".tif", ".jpg"))
-        if not os.path.exists(jpg_path):  # skip if already converted
-            img = Image.open(os.path.join(pos_dir, file))
-            rgb_img = img.convert("RGB")
-            rgb_img.save(jpg_path)
-print("✅ Positive image conversion complete.\n")
+print("🐦 Starting dataset preparation...")
 
-# ==== STEP 2: Generate YOLO labels from CSV ====
-print("🧾 Generating YOLO labels from CSV ...")
+# ==== STEP 1: Convert .tif → .jpg (Positive + Negative) ====
+def convert_tif_to_jpg(src_dir, dst_dir):
+    os.makedirs(dst_dir, exist_ok=True)
+    count = 0
+    for f in os.listdir(src_dir):
+        if f.lower().endswith(".tif"):
+            img_path = os.path.join(src_dir, f)
+            out_path = os.path.join(dst_dir, f.replace(".tif", ".jpg"))
+            try:
+                Image.open(img_path).convert("RGB").save(out_path, "JPEG")
+                count += 1
+            except Exception as e:
+                print(f"⚠️ Error converting {f}: {e}")
+    print(f"✅ Converted {count} .tif images from {src_dir}")
 
-# Read as comma-separated with header
-df = pd.read_csv(csv_path, header=0, sep=',')
+print("🔄 Converting .tif to .jpg ...")
+convert_tif_to_jpg(pos_img_dir, output_image_dir)
+convert_tif_to_jpg(neg_img_dir, output_image_dir)
 
-# Normalize/rename columns
-df.columns = [c.strip() for c in df.columns]  # strip spaces
-rename_map = {
-    'imageFilename': 'filename',
-    'x(column)': 'x_min',
-    'y(row)': 'y_min',
-    'width': 'width',
-    'height': 'height'
-}
-df = df.rename(columns=rename_map)
+# ==== STEP 2: Generate YOLO Labels ====
+def generate_yolo_labels():
+    print("\n🧾 Generating YOLO labels from CSV ...")
 
-# Basic sanity: drop rows with missing values and coerce numeric types
-df = df.dropna(subset=['filename', 'x_min', 'y_min', 'width', 'height'])
-for c in ['x_min', 'y_min', 'width', 'height']:
-    df[c] = pd.to_numeric(df[c], errors='coerce')
-df = df.dropna(subset=['x_min', 'y_min', 'width', 'height'])
+    # Load CSV correctly (comma-separated)
+    df = pd.read_csv(csv_path, header=0, sep=',')
+    df.columns = [c.strip() for c in df.columns]
+    rename_map = {
+        'imageFilename': 'filename',
+        'x(column)': 'x_min',
+        'y(row)': 'y_min',
+        'width': 'width',
+        'height': 'height'
+    }
+    df = df.rename(columns=rename_map)
 
-print("First 5 parsed rows:")
-print(df.head())
+    # Clean & validate
+    df = df.dropna(subset=['filename', 'x_min', 'y_min', 'width', 'height'])
+    for c in ['x_min', 'y_min', 'width', 'height']:
+        df[c] = pd.to_numeric(df[c], errors='coerce')
+    df = df.dropna(subset=['x_min', 'y_min', 'width', 'height'])
 
-print("✅ YOLO label generation complete.\n")
+    print("First 5 parsed rows:")
+    print(df.head())
 
-# ==== STEP 3: Handle negative images ====
-print("🚫 Processing negative images (no waterfowl) ...")
-for file in os.listdir(neg_dir):
-    if file.endswith(".tif"):
-        jpg_path = os.path.join(output_image_dir, file.replace(".tif", ".jpg"))
-        txt_path = os.path.join(output_label_dir, file.replace(".tif", ".txt"))
-        if not os.path.exists(jpg_path):
-            img = Image.open(os.path.join(neg_dir, file))
-            rgb_img = img.convert("RGB")
-            rgb_img.save(jpg_path)
-        if not os.path.exists(txt_path):
-            open(txt_path, 'w').close()
-print("✅ Negative images processed.\n")
+    os.makedirs(output_label_dir, exist_ok=True)
+    label_count = 0
 
-# ==== STEP 4: Split dataset ====
-random.seed(42)  # ensures reproducible splits
+    # Group and write YOLO labels
+    for filename, group in df.groupby('filename'):
+        jpg_name = filename.strip().replace('.TIF', '.jpg').replace('.tif', '.jpg')
+        img_path = os.path.join(output_image_dir, jpg_name)
+        if not os.path.exists(img_path):
+            continue
 
-if os.path.exists("data/images/train") and os.listdir("data/images/train"):
-    print("⚠️  Dataset split already exists — skipping splitting step.\n")
+        with Image.open(img_path) as im:
+            img_w, img_h = im.size
+
+        label_path = os.path.join(output_label_dir, jpg_name.replace('.jpg', '.txt'))
+        with open(label_path, 'w') as f:
+            for _, row in group.iterrows():
+                x_center = (row['x_min'] + row['width'] / 2) / img_w
+                y_center = (row['y_min'] + row['height'] / 2) / img_h
+                w = row['width'] / img_w
+                h = row['height'] / img_h
+                f.write(f"0 {x_center:.6f} {y_center:.6f} {w:.6f} {h:.6f}\n")
+                label_count += 1
+
+    print(f"✅ YOLO label generation complete ({label_count} boxes written).\n")
+
+# === Check if label directory exists or is empty ===
+if not os.path.exists(output_label_dir) or len(os.listdir(output_label_dir)) == 0:
+    generate_yolo_labels()
 else:
-    print("✂️ Splitting dataset into train/val/test ...")
-    images = [f for f in os.listdir(output_image_dir) if f.endswith(".jpg")]
-    random.shuffle(images)
+    empty_labels = [f for f in os.listdir(output_label_dir)
+                    if os.path.getsize(os.path.join(output_label_dir, f)) == 0]
+    if len(empty_labels) > 0:
+        print(f"⚠️ Found {len(empty_labels)} empty label files, regenerating ...")
+        generate_yolo_labels()
+    else:
+        print("✅ Label files already exist and are non-empty — skipping regeneration.\n")
 
-    n = len(images)
-    train_split = int(0.8 * n)
-    val_split = int(0.9 * n)
+# ==== STEP 3: Split train/val/test ====
+def split_dataset():
+    print("✂️ Splitting dataset into train/val/test ...")
+
+    import random
+    from glob import glob
+
+    os.makedirs("data/images/train", exist_ok=True)
+    os.makedirs("data/images/val", exist_ok=True)
+    os.makedirs("data/images/test", exist_ok=True)
+    os.makedirs("data/labels/train", exist_ok=True)
+    os.makedirs("data/labels/val", exist_ok=True)
+    os.makedirs("data/labels/test", exist_ok=True)
+
+    all_images = glob(os.path.join(output_image_dir, "*.jpg"))
+    random.shuffle(all_images)
+
+    n_total = len(all_images)
+    n_train = int(0.8 * n_total)
+    n_val = int(0.1 * n_total)
+    n_test = n_total - n_train - n_val
 
     splits = {
-        'train': images[:train_split],
-        'val': images[train_split:val_split],
-        'test': images[val_split:]
+        "train": all_images[:n_train],
+        "val": all_images[n_train:n_train + n_val],
+        "test": all_images[n_train + n_val:]
     }
 
     for split, files in splits.items():
-        os.makedirs(f"data/images/{split}", exist_ok=True)
-        os.makedirs(f"data/labels/{split}", exist_ok=True)
         for f in files:
-            shutil.copy(os.path.join(output_image_dir, f), f"data/images/{split}/{f}")
-            label_src = os.path.join(output_label_dir, f.replace(".jpg", ".txt"))
-            label_dst = f"data/labels/{split}/{f.replace('.jpg', '.txt')}"
+            shutil.copy(f, f"data/images/{split}/")
+            label_file = os.path.basename(f).replace(".jpg", ".txt")
+            src_label = os.path.join(output_label_dir, label_file)
+            if os.path.exists(src_label):
+                shutil.copy(src_label, f"data/labels/{split}/{label_file}")
 
-            # if missing, create empty file
-            if not os.path.exists(label_src):
-                print(f"⚠️ Warning: Missing label for {f} — creating empty file.")
-                open(label_dst, 'w').close()
-            else:
-                shutil.copy(label_src, label_dst)
+    print(f"✅ Split complete:\n  Train: {n_train}\n  Val: {n_val}\n  Test: {n_test}\n")
 
-    print("✅ Dataset splitting complete.\n")
+split_dataset()
 
-# ==== STEP 5: Dataset Summary ====
+# ==== SUMMARY ====
 def count_files(path, ext):
-    if not os.path.exists(path):
-        os.makedirs(path, exist_ok=True)
-        return 0
+    if not os.path.exists(path): return 0
     return len([f for f in os.listdir(path) if f.endswith(ext)])
 
 train_count = count_files("data/images/train", ".jpg")
@@ -119,12 +150,9 @@ val_count = count_files("data/images/val", ".jpg")
 test_count = count_files("data/images/test", ".jpg")
 total_labels = count_files(output_label_dir, ".txt")
 
-print("\n📊 DATASET SUMMARY:")
+print(f"📊 DATASET SUMMARY:")
 print(f"  • Train: {train_count} images")
 print(f"  • Val:   {val_count} images")
 print(f"  • Test:  {test_count} images")
-print(f"  • Total label files (all): {total_labels}")
-print(f"  • Total images overall: {train_count + val_count + test_count}")
-
-print("\n✅ Dataset preparation completed successfully!")
-
+print(f"  • Total label files: {total_labels}")
+print(f"✅ Dataset preparation complete!")
